@@ -1,6 +1,12 @@
 import json
 import asyncio
 import re
+import base64
+import binascii
+import logging
+import os
+import threading
+import time
 from typing import List, Optional
 
 from fastapi import FastAPI
@@ -12,18 +18,37 @@ from pydantic import BaseModel
 import config
 from agent_runner import run_chat_turn
 from database import (
+    canonicalize_user_id,
     create_session,
     ensure_user,
     get_chat_history,
+    get_city_index_status,
     get_user_by_session,
     get_user_preferences,
+    purge_expired_sessions,
+    revoke_session,
     save_chat_message,
     save_visited_place,
     update_user_preferences,
 )
-from llm_factory import get_chat_llm, get_vision_llm
-from prompting import build_system_prompt
-from tools import scrape_live_context, scrape_static_history, search_local_history, search_web, get_weather
+from ingest_data import ingest_city
+from llm_factory import get_chat_llm
+from prompting import build_system_prompt, strip_editor_meta_from_user_text
+from tools import (
+    scrape_live_context,
+    scrape_static_history,
+    search_local_history,
+    search_web,
+    get_weather,
+    serpapi_google_lens_lookup,
+)
+
+_LOG_LEVEL = (os.getenv("APP_LOG_LEVEL") or "DEBUG").upper()
+logging.basicConfig(
+    level=getattr(logging, _LOG_LEVEL, logging.DEBUG),
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+logger = logging.getLogger("walkietalkie.main")
 
 app = FastAPI()
 app.add_middleware(
@@ -51,6 +76,7 @@ class ChatRequest(BaseModel):
     longitude: Optional[float] = None
     city: Optional[str] = "San Francisco"
     session_token: Optional[str] = None
+    prompting_mode: Optional[str] = "self_reflection"
 
 
 class ItineraryRequest(BaseModel):
@@ -93,6 +119,14 @@ class VisitedPlaceRequest(BaseModel):
     session_token: str
     city: str
     place_name: str
+
+
+class LogoutRequest(BaseModel):
+    session_token: str
+
+
+class CityWarmupRequest(BaseModel):
+    city: str
 
 
 _PLACEHOLDER_TITLE_RE = re.compile(
@@ -162,7 +196,6 @@ def _tier_model_candidates(tier: str) -> list[str]:
     if tier == "large":
         return [
             config.LARGE_LLM_MODEL,
-            config.LARGE_LLM_FALLBACK_MODEL,
             config.OLLAMA_LARGE_LLM_MODEL,
         ]
     return [config.SMALL_LLM_MODEL, config.OLLAMA_SMALL_LLM_MODEL]
@@ -211,14 +244,80 @@ def _resolve_tier(request: ChatRequest) -> str:
     return "large"
 
 
-vision_llm = None
+def _resolve_prompting_mode(raw_mode: str | None) -> str:
+    mode = (raw_mode or "self_reflection").strip().lower()
+    if mode in ("regular", "meta", "chaining", "self_reflection"):
+        return mode
+    return "self_reflection"
 
 
-def _get_vision():
-    global vision_llm
-    if vision_llm is None:
-        vision_llm = get_vision_llm()
-    return vision_llm
+def _format_lens_matches(lens: dict, max_results: int = 5) -> str:
+    matches = lens.get("matches") or []
+    if not matches:
+        return "No image matches found."
+    lines = []
+    for i, m in enumerate(matches[:max_results], start=1):
+        lines.append(
+            f"{i}. title={m.get('title','')} | snippet={m.get('snippet','')} | link={m.get('link','')}"
+        )
+    return "\n".join(lines)
+
+
+def _preview(text: str, limit: int = 800) -> str:
+    return (text or "")[:limit]
+
+
+def _friendly_error_message(err: Exception, context: str = "chat") -> str:
+    """
+    Convert provider/internal exceptions into safe user-facing text.
+    """
+    msg = str(err or "")
+    low = msg.lower()
+    if "ratelimit" in low or "rate limit" in low or "429" in low:
+        return (
+            "I'm getting rate-limited right now. Please try again in a bit, "
+            "or switch model tier if available."
+        )
+    if context == "image":
+        return "I couldn't process that image right now. Please try another image or try again shortly."
+    return "I couldn't complete that request right now. Please try again in a moment."
+
+
+_CITY_INDEX_TTL_SEC = 14 * 24 * 3600
+_city_warmup_locks: dict[str, threading.Lock] = {}
+
+
+def _city_is_ready_fresh(city: str) -> bool:
+    st = get_city_index_status(city)
+    if not st or st.get("status") != "ready":
+        return False
+    return int(time.time()) - int(st.get("updated_at") or 0) < _CITY_INDEX_TTL_SEC
+
+
+def _ensure_city_warmup_async(city: str) -> None:
+    city = (city or "").strip()
+    if not city:
+        return
+    if _city_is_ready_fresh(city):
+        return
+
+    lock = _city_warmup_locks.setdefault(city, threading.Lock())
+    if lock.locked():
+        return
+
+    def _job():
+        if not lock.acquire(blocking=False):
+            return
+        try:
+            logger.info("City warmup start | city=%s", city)
+            result = ingest_city(city, max_sources=8)
+            logger.info("City warmup complete | city=%s result=%s", city, result)
+        except Exception as e:
+            logger.exception("City warmup failed | city=%s err=%s", city, e)
+        finally:
+            lock.release()
+
+    threading.Thread(target=_job, daemon=True).start()
 
 
 async def stream_response(text: str):
@@ -231,70 +330,140 @@ async def stream_response(text: str):
 
 @app.post("/api/chat")
 async def chat_endpoint(request: ChatRequest):
-    print("\n--- NEW REQUEST ---")
+    logger.info("--- NEW REQUEST ---")
     tier = _resolve_tier(request)
-    print(f"tier={tier} city={request.city}")
+    prompting_mode = _resolve_prompting_mode(request.prompting_mode)
+    logger.info(
+        "chat request meta | tier=%s prompting_mode=%s city=%s stream=%s messages=%s",
+        tier,
+        prompting_mode,
+        request.city,
+        request.stream,
+        len(request.messages or []),
+    )
 
     session = get_user_by_session((request.session_token or "").strip())
     user_id = session["user_id"] if session else "guest_local"
     formatted_messages = []
+    last_user_msg_idx: int | None = None
+
+    last_raw_user_message = ""
+    if not request.messages:
+        error_msg = "Please send at least one message so I can help."
+        return StreamingResponse(stream_response(error_msg), media_type="application/x-ndjson")
 
     for m in request.messages:
         if m.role == "system":
-            continue
-        if m.role == "user":
+            # Preserve frontend/system constraints so prompt strategy stays aligned.
+            formatted_messages.append(SystemMessage(content=m.content))
+        elif m.role == "user":
+            last_raw_user_message = m.content or ""
             content_str = m.content
+            logger.debug("user message preview: %s", _preview(m.content))
             if m.images and len(m.images) > 0:
-                print("Vision image detected — API vision model")
+                logger.info(
+                    "Image upload detected | image_count=%s | first_image_chars=%s",
+                    len(m.images),
+                    len(m.images[0] or ""),
+                )
                 try:
-                    vision_prompt = (
-                        f"Analyze this image. User asked: {m.content}. "
-                        "Identify the landmark, mural, or location in detail. "
-                        "If you CANNOT confidently identify the specific landmark or mural, "
-                        "output EXACTLY the phrase 'UNKNOWN_LANDMARK' and nothing else."
-                    )
-                    v_msg = HumanMessage(
-                        content=[
-                            {"type": "text", "text": vision_prompt},
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{m.images[0]}"}},
-                        ]
-                    )
-                    v_resp = _get_vision().invoke([v_msg])
-                    body = v_resp.content or ""
+                    city = request.city or "San Francisco"
+                    raw_img = m.images[0] or ""
+                    if "," in raw_img:
+                        raw_img = raw_img.split(",", 1)[1]
+                    try:
+                        image_bytes = base64.b64decode(raw_img, validate=False)
+                    except (binascii.Error, ValueError):
+                        image_bytes = b""
 
-                    if "UNKNOWN_LANDMARK" in body:
-                        print("Vision could not ID — web fallback")
-                        gps_context = (
-                            f"Lat: {request.latitude}, Long: {request.longitude}"
-                            if request.latitude and request.longitude
-                            else "Unknown Location"
-                        )
-                        search_query = f"{m.content} near {gps_context}"
-                        web_result = search_web.invoke(search_query)
-                        content_str = (
-                            f"[IMAGE ANALYSIS FAILED. WEB FALLBACK DATA: {web_result}]. "
-                            f"If the web data doesn't answer the user's specific question about the image, "
-                            f"apologize once and give a generalized historical note about {gps_context}.\n\n"
-                            f"User Question: {m.content}"
+                    lens = serpapi_google_lens_lookup(image_bytes=image_bytes, city=city, max_results=5) if image_bytes else {
+                        "ok": False,
+                        "error": "Invalid image payload",
+                        "matches": [],
+                    }
+                    lens_block = _format_lens_matches(lens, max_results=5)
+                    logger.info(
+                        "Image lookup result | ok=%s matches=%s error=%s",
+                        lens.get("ok"),
+                        len(lens.get("matches") or []),
+                        lens.get("error", ""),
+                    )
+                    logger.debug("Lens match block preview: %s", _preview(lens_block, 1200))
+
+                    # Targeted web context synthesis from image matches and user intent.
+                    if lens.get("ok") and (lens.get("matches") or []):
+                        top_title = str((lens.get("matches") or [{}])[0].get("title", "")).strip()
+                        web_query = f"{city} {top_title} {m.content}".strip()
+                    elif lens.get("ok"):
+                        web_query = f"{city} {m.content}".strip()
+                    else:
+                        # Avoid propagating failure/error strings as web search query content.
+                        web_query = f"{city} image identification from user upload".strip()
+                    logger.info("Image web query: %s", _preview(web_query, 500))
+                    web_context = search_web.invoke(web_query)
+                    logger.debug("Image web context preview: %s", _preview(str(web_context), 1500))
+
+                    is_menu_query = any(k in (m.content or "").lower() for k in ["menu", "dish", "eat", "food"])
+                    if is_menu_query:
+                        instruction = (
+                            "Instruction: Use image recognition matches + web context to identify likely restaurant/menu, "
+                            "then recommend the most authentic or popular local dish with a short why."
                         )
                     else:
-                        content_str = f"[IMAGE ANALYSIS CONTEXT: {body}]\n\nUser Question: {m.content}"
+                        instruction = (
+                            "Instruction: Use image recognition matches + web context to identify the place/mural, "
+                            "then explain its story (what it is, why it matters)."
+                        )
+
+                    if not lens.get("ok"):
+                        content_str = (
+                            f"[SERPAPI GOOGLE LENS STATUS]\nfailed={lens.get('error','unknown')}\n\n"
+                            f"[WEB SEARCH CONTEXT]\n{str(web_context)[:2200]}\n\n"
+                            "Instruction: Be transparent that image recognition lookup failed. "
+                            "Answer from available context; if uncertain, clearly say so."
+                        )
+                    elif lens.get("matches"):
+                        content_str = (
+                            f"[SERPAPI GOOGLE LENS TOP 5 MATCHES]\n{lens_block}\n\n"
+                            f"[WEB SEARCH CONTEXT]\n{str(web_context)[:2200]}\n\n"
+                            f"{instruction}"
+                        )
+                    else:
+                        content_str = (
+                            "[SERPAPI GOOGLE LENS TOP 5 MATCHES]\nNo confident matches returned.\n\n"
+                            f"[WEB SEARCH CONTEXT]\n{str(web_context)[:2200]}\n\n"
+                            "Instruction: Tell the user no confident image match was found. "
+                            "Then provide a cautious answer from web context."
+                        )
                 except Exception as e:
-                    print(f"Vision processing failed: {e}")
+                    logger.exception("Image research processing failed: %s", e)
 
             formatted_messages.append(HumanMessage(content=content_str))
+            last_user_msg_idx = len(formatted_messages) - 1
         else:
             formatted_messages.append(AIMessage(content=m.content))
 
-    gps_info = (
-        f"Lat: {request.latitude}, Long: {request.longitude}"
-        if request.latitude and request.longitude
-        else "Location Unknown"
-    )
+    has_device_gps = request.latitude is not None and request.longitude is not None
+    if has_device_gps:
+        gps_line = (
+            f"DEVICE_GPS_AVAILABLE=true; Lat={request.latitude}; Long={request.longitude}. "
+            "You may tie the reply to this approximate area when it helps."
+        )
+    else:
+        gps_line = (
+            "DEVICE_GPS_AVAILABLE=false. "
+            "Do NOT tell the user their GPS, location pin, or device places them in a neighborhood "
+            "unless they stated their whereabouts in their own words. "
+            "Use focus_city for general guidance only."
+        )
     city = request.city or "San Francisco"
-    formatted_messages[-1].content = (
-        f"Backend context: user_id={user_id}; GPS={gps_info}; focus_city={city}.\n\n"
-        + formatted_messages[-1].content
+    _ensure_city_warmup_async(city)
+    if last_user_msg_idx is None:
+        error_msg = "Please include a user message in the chat payload."
+        return StreamingResponse(stream_response(error_msg), media_type="application/x-ndjson")
+    formatted_messages[last_user_msg_idx].content = (
+        f"Backend context: user_id={user_id}; {gps_line} focus_city={city}.\n\n"
+        + formatted_messages[last_user_msg_idx].content
     )
 
     try:
@@ -303,26 +472,26 @@ async def chat_endpoint(request: ChatRequest):
             tier=tier,
             user_id=user_id,
             city=city,
-            latitude=request.latitude,
-            longitude=request.longitude,
+            latitude=request.latitude if has_device_gps else None,
+            longitude=request.longitude if has_device_gps else None,
+            prompting_mode=prompting_mode,
         )
         # Save only the last user turn + final assistant response for history view.
-        user_turn_text = ""
-        if formatted_messages:
-            last_msg = formatted_messages[-1]
-            user_turn_text = str(getattr(last_msg, "content", "") or "")
+        user_turn_text = (last_raw_user_message or "").strip()
+        if request.messages and request.messages[-1].images:
+            user_turn_text = f"{user_turn_text}\n[image_uploaded=true]"
         # Persist history only for authenticated sessions.
         if session:
             save_chat_message(user_id=user_id, city=city, role="user", content=user_turn_text)
             save_chat_message(user_id=user_id, city=city, role="assistant", content=final_answer)
-        print(f"[Profiling] generation {generation_time:.3f}s (tier={tier})")
+        logger.info("generation complete | tier=%s elapsed=%.3fs", tier, generation_time)
+        logger.debug("final answer preview: %s", _preview(final_answer, 2000))
         return StreamingResponse(stream_response(final_answer), media_type="application/x-ndjson")
     except Exception as e:
         import traceback
 
-        print("INTERNAL ERROR TRACEBACK:")
-        print(traceback.format_exc())
-        error_msg = f"Agent Error: {repr(e)}"
+        logger.error("INTERNAL ERROR TRACEBACK:\n%s", traceback.format_exc())
+        error_msg = _friendly_error_message(e, context="chat")
         return StreamingResponse(stream_response(error_msg), media_type="application/x-ndjson")
 
 
@@ -436,7 +605,7 @@ Output ONLY valid JSON inside the <final_answer> block. No markdown around the J
             "places": [],
             "eats": [],
             "itinerary": [],
-            "error": str(e),
+            "error": "Itinerary generation is temporarily unavailable. Please try again shortly.",
             "_debug": {
                 "tier": itinerary_tier,
                 "provider_mode": provider_mode,
@@ -483,15 +652,17 @@ Trip: {req.city}. Travel window: {window}.
 Write:
 1) A short paragraph on likely weather during this window (say if uncertain).
 2) A bullet list of clothing and gear (layers, footwear, rain/sun, daypack) suited to this city and length ({req.days} days).
-Keep total under 260 words. Friendly, practical tone. No markdown # headers."""
+Keep total under 260 words. Friendly, practical tone. No markdown # headers.
+Output only the advice text the traveler reads — no editor notes, word counts, or "key edits" lists."""
 
     try:
         llm = get_chat_llm("small")
         resp = llm.invoke([HumanMessage(content=prompt)])
-        advice = (resp.content or "").strip()
+        advice = strip_editor_meta_from_user_text((resp.content or "").strip())
     except Exception as e:
+        safe_err = _friendly_error_message(e, context="holiday")
         return {
-            "error": repr(e),
+            "error": safe_err,
             "packing_advice": "",
             "web_context": str(web)[:2000],
         }
@@ -524,11 +695,14 @@ Known local context:
 
 Requirements:
 - 80-150 words.
+- Output must be in English.
 - Conversational and vivid (not robotic).
-- Mention one physical detail to notice right now.
-- Include one "I bet you didn't know" style historical/cultural detail.
-- End with exactly one sentence labeled "Local Secret:".
+- The conversation could include a physical detail to notice right now, one historical/cultural detail and a local secret".
+- Add a joke or light-hearted comment if it fits naturally, but don't force humor.
+- Calculate the best next spot they should walk to from here, and if it is within a reasonable walking distance, mention it as a recommendation at the end.
+- If there are no places to visit in walking distance, mention that fact and recommend another place near by they could visit by using transportation.
 - Do not use markdown.
+- Output only the spoken narration — no preambles, editor notes, or word counts.
 """
     try:
         llm = get_chat_llm(tier)
@@ -538,13 +712,13 @@ Requirements:
                 HumanMessage(content=prompt),
             ]
         )
-        story = (out.content or "").strip()
+        story = strip_editor_meta_from_user_text((out.content or "").strip())
         if not story:
             story = f"You're at {place}. {anecdote}".strip()
         return {"story": story, "model_tier": tier}
     except Exception as e:
         fallback = f"You're at {place}. {anecdote}".strip()
-        return {"story": fallback, "model_tier": tier, "error": repr(e)}
+        return {"story": fallback, "model_tier": tier, "error": _friendly_error_message(e, context="walk_story")}
 
 
 @app.get("/")
@@ -558,9 +732,12 @@ def read_root():
 
 @app.post("/api/auth/signin")
 def auth_signin(req: SignInRequest):
-    uid = req.user_id.strip()
+    uid = canonicalize_user_id(req.user_id)
     if not uid:
         return {"error": "user_id is required"}
+    purged = purge_expired_sessions()
+    if purged:
+        logger.info("Purged expired sessions on signin | deleted=%s", purged)
     ensure_user(uid, display_name=req.display_name or uid)
     if req.budget is not None or req.dietary is not None or req.country is not None:
         update_user_preferences(uid, budget=req.budget, dietary=req.dietary, country=req.country)
@@ -575,6 +752,34 @@ def auth_me(session_token: str):
     if not s:
         return {"ok": False, "error": "invalid_or_expired_session"}
     return {"ok": True, "user": s}
+
+
+@app.post("/api/auth/logout")
+def auth_logout(req: LogoutRequest):
+    ok = revoke_session((req.session_token or "").strip())
+    return {"ok": ok}
+
+
+@app.post("/api/city/warmup")
+def city_warmup(req: CityWarmupRequest):
+    city = (req.city or "").strip()
+    if city not in config.HERO_CITIES:
+        return {"ok": False, "error": f"Unsupported city. Choose one of: {', '.join(config.HERO_CITIES)}"}
+    _ensure_city_warmup_async(city)
+    st = get_city_index_status(city)
+    return {"ok": True, "city": city, "status": st or {"city": city, "status": "building"}}
+
+
+@app.get("/api/city/status")
+def city_status(city: str):
+    city = (city or "").strip()
+    if not city:
+        return {"ok": False, "error": "city is required"}
+    st = get_city_index_status(city)
+    if not st:
+        return {"ok": True, "city": city, "status": "missing"}
+    fresh = int(time.time()) - int(st.get("updated_at") or 0) < _CITY_INDEX_TTL_SEC
+    return {"ok": True, "city": city, **st, "fresh": fresh}
 
 
 @app.patch("/api/user/profile")
@@ -628,7 +833,6 @@ def qa_status():
         "models": {
             "small": config.SMALL_LLM_MODEL,
             "large": config.LARGE_LLM_MODEL,
-            "vision": config.VISION_LLM_MODEL,
             "embedding": config.OPENROUTER_EMBEDDING_MODEL or config.EMBEDDING_MODEL,
         },
         "hero_cities": list(config.HERO_CITIES),

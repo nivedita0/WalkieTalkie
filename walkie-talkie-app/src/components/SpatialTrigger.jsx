@@ -11,9 +11,8 @@ import { generateIntro } from '../utils/storyTemplating';
  *
  * @param {string} city — Trip city (always from the toolbar).
  * @param {string|null} [areaLabel] — Neighborhood / day locality from the itinerary when available.
- * @param {{lat:number,lng:number,accuracy?:number}|null} [mockLocation] - Optional simulation location for testing.
  */
-export default function SpatialTrigger({ city = "this city", areaLabel = null, mockLocation = null, llmTier = "small", onClose }) {
+export default function SpatialTrigger({ city = "this city", areaLabel = null, llmTier = "small", onClose }) {
     const primaryArea =
         typeof areaLabel === "string" && areaLabel.trim().length > 0 ? areaLabel.trim() : city;
     const showCityLine =
@@ -21,8 +20,7 @@ export default function SpatialTrigger({ city = "this city", areaLabel = null, m
         areaLabel.trim().length > 0 &&
         city &&
         areaLabel.trim().toLowerCase() !== city.trim().toLowerCase();
-    const { location: liveLocation, error } = useGeolocation();
-    const location = mockLocation || liveLocation;
+    const { location, error } = useGeolocation();
     const [nodes, setNodes] = useState([]);
     const [targetNode, setTargetNode] = useState(null);
     const [distance, setDistance] = useState(null);
@@ -105,8 +103,7 @@ export default function SpatialTrigger({ city = "this city", areaLabel = null, m
                     <p style={styles.cityLine}>{city}</p>
                 ) : null}
                 <p style={styles.blurb}>
-                    Choose a stop in <strong>this area</strong> — we’re not giving turn-by-turn directions.
-                    Wander the block; when you’re within about 20m, the story unlocks automatically.
+                    Choose a stop in this area. Wander the block; when you’re within about 20m, the story unlocks automatically.
                 </p>
 
                 {error && <p style={styles.error}>Location error: {error}</p>}

@@ -13,3 +13,28 @@
 *.pfx
 *credentials*.json
 secrets*.json
+
+# Python and local virtual environments
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+**/.venv/
+
+# Node build/dependency artifacts
+node_modules/
+**/node_modules/
+
+# Local runtime data/artifacts
+*.db
+backend/chroma_db/
+
+# Evaluation results and test artifacts
+evaluation/results/
+evaluation/*.jsonl
+evaluation/*.json
+evaluation/*_results.txt
+
+# OS/editor clutter
+.DS_Store

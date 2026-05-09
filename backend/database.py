@@ -6,6 +6,13 @@ from typing import Optional
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "walkie_talkie.db")
 
+
+def canonicalize_user_id(user_id: str) -> str:
+    """
+    Normalize user IDs so identity is consistent across casing/spacing variants.
+    """
+    return (user_id or "").strip().lower()
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -49,6 +56,16 @@ def init_db():
             FOREIGN KEY (user_id) REFERENCES users (user_id)
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS city_index_status (
+            city TEXT PRIMARY KEY,
+            status TEXT NOT NULL,               -- missing | building | ready | failed
+            updated_at INTEGER NOT NULL,        -- unix epoch seconds
+            source_count INTEGER DEFAULT 0,
+            chunk_count INTEGER DEFAULT 0,
+            error TEXT
+        )
+    ''')
     
     # Best-effort schema evolution for existing DBs that may not have these columns.
     for alter_sql in (
@@ -65,6 +82,7 @@ def init_db():
     conn.close()
 
 def ensure_user(user_id: str, display_name: Optional[str] = None):
+    user_id = canonicalize_user_id(user_id)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
@@ -77,6 +95,8 @@ def ensure_user(user_id: str, display_name: Optional[str] = None):
     conn.close()
 
 def create_session(user_id: str, ttl_hours: int = 24) -> dict:
+    user_id = canonicalize_user_id(user_id)
+    purge_expired_sessions()
     ensure_user(user_id)
     token = secrets.token_urlsafe(32)
     expires_at = int(time.time()) + (ttl_hours * 3600)
@@ -93,6 +113,7 @@ def create_session(user_id: str, ttl_hours: int = 24) -> dict:
 def get_user_by_session(session_token: str) -> Optional[dict]:
     if not session_token:
         return None
+    purge_expired_sessions()
     now = int(time.time())
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -118,12 +139,36 @@ def get_user_by_session(session_token: str) -> Optional[dict]:
         "country": row[5],
     }
 
+
+def revoke_session(session_token: str) -> bool:
+    if not session_token:
+        return False
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM sessions WHERE session_token = ?", (session_token,))
+    deleted = cursor.rowcount > 0
+    conn.commit()
+    conn.close()
+    return deleted
+
+
+def purge_expired_sessions() -> int:
+    now = int(time.time())
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM sessions WHERE expires_at <= ?", (now,))
+    deleted = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return deleted
+
 def update_user_preferences(
     user_id: str,
     budget: Optional[int] = None,
     dietary: Optional[str] = None,
     country: Optional[str] = None,
 ):
+    user_id = canonicalize_user_id(user_id)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     ensure_user(user_id)
@@ -137,6 +182,7 @@ def update_user_preferences(
     conn.close()
 
 def get_user_preferences(user_id: str):
+    user_id = canonicalize_user_id(user_id)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT budget, dietary_restriction, home_country FROM users WHERE user_id = ?", (user_id,))
@@ -147,6 +193,7 @@ def get_user_preferences(user_id: str):
     return None
 
 def save_visited_place(user_id: str, place_name: str, city: Optional[str] = None):
+    user_id = canonicalize_user_id(user_id)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
@@ -158,6 +205,7 @@ def save_visited_place(user_id: str, place_name: str, city: Optional[str] = None
     return f"Saved {place_name} for user {user_id}"
 
 def save_chat_message(user_id: str, city: str, role: str, content: str):
+    user_id = canonicalize_user_id(user_id)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
@@ -168,6 +216,7 @@ def save_chat_message(user_id: str, city: str, role: str, content: str):
     conn.close()
 
 def get_chat_history(user_id: str, city: str, limit: int = 100):
+    user_id = canonicalize_user_id(user_id)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
@@ -184,6 +233,60 @@ def get_chat_history(user_id: str, city: str, limit: int = 100):
     conn.close()
     rows.reverse()
     return [{"role": r[0], "content": r[1], "created_at": r[2]} for r in rows]
+
+
+def set_city_index_status(
+    city: str,
+    status: str,
+    source_count: int = 0,
+    chunk_count: int = 0,
+    error: Optional[str] = None,
+):
+    city = (city or "").strip()
+    if not city:
+        return
+    now = int(time.time())
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO city_index_status (city, status, updated_at, source_count, chunk_count, error)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(city) DO UPDATE SET
+            status=excluded.status,
+            updated_at=excluded.updated_at,
+            source_count=excluded.source_count,
+            chunk_count=excluded.chunk_count,
+            error=excluded.error
+        """,
+        (city, status, now, source_count, chunk_count, error),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_city_index_status(city: str) -> Optional[dict]:
+    city = (city or "").strip()
+    if not city:
+        return None
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT city, status, updated_at, source_count, chunk_count, error FROM city_index_status WHERE city = ?",
+        (city,),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "city": row[0],
+        "status": row[1],
+        "updated_at": row[2],
+        "source_count": row[3],
+        "chunk_count": row[4],
+        "error": row[5],
+    }
 
 # Initialize db on load
 init_db()

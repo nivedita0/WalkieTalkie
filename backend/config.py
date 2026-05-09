@@ -37,6 +37,11 @@ def openweathermap_api_key() -> str:
     return (os.getenv("OPENWEATHERMAP_API_KEY") or "").strip()
 
 
+def serpapi_api_key() -> str:
+    """SerpAPI key for Google Lens image recognition and search."""
+    return (os.getenv("SERPAPI_API_KEY") or "").strip()
+
+
 def itinerary_timeout_seconds() -> float:
     """Max seconds to wait for one itinerary model call before fallback."""
     try:
@@ -48,8 +53,6 @@ def itinerary_timeout_seconds() -> float:
 # OpenRouter chat/vision model IDs.
 SMALL_LLM_MODEL: str = os.getenv("SMALL_LLM_MODEL", "nvidia/nemotron-nano-9b-v2:free")
 LARGE_LLM_MODEL: str = os.getenv("LARGE_LLM_MODEL", "nvidia/nemotron-3-nano-30b-a3b:free")
-# Fallback chain: large primary → this model → Ollama.
-LARGE_LLM_FALLBACK_MODEL: str = os.getenv("LARGE_LLM_FALLBACK_MODEL", "google/gemma-4-31b-it:free")
 VISION_LLM_MODEL: str = os.getenv("VISION_LLM_MODEL", "nvidia/nemotron-nano-12b-v2-vl:free")
 
 # Optional OpenRouter embedding model (if empty, Ollama embeddings are used).

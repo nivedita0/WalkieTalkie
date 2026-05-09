@@ -2,56 +2,6 @@ import { openDB } from 'idb';
 
 const DB_NAME = 'WalkieTalkieVault';
 const STORE_NAME = 'nodes';
-let sfDefaultsPromise = null;
-
-async function loadSanFranciscoDefaultStops() {
-    if (!sfDefaultsPromise) {
-        sfDefaultsPromise = import('../data/mockNodes.js')
-            .then((m) => (Array.isArray(m.mockNodes) ? m.mockNodes : []))
-            .catch(() => []);
-    }
-    return sfDefaultsPromise;
-}
-
-/** Original SF Chinatown walking stops (hero demo); merged after SF itinerary sync so they stay available. */
-async function mergeSanFranciscoDefaultStops(tx, defaultStops) {
-    for (const raw of defaultStops) {
-        if (!raw || !raw.id) continue;
-        await tx.store.put({
-            ...raw,
-            visited: false,
-            lastVisited: null,
-            type: 'place',
-        });
-    }
-}
-
-/** If IndexedDB has no walk nodes yet, seed SF defaults (only when city is San Francisco). */
-export async function ensureDefaultWalkNodesForCity(city) {
-    if (city !== 'San Francisco') return;
-    const db = await initDB();
-    const all = await db.getAll(STORE_NAME);
-    const walkNodes = all.filter((n) => n.id !== 'SYSTEM_ITINERARY_MAPPING');
-    if (walkNodes.length > 0) return;
-    const defaultStops = await loadSanFranciscoDefaultStops();
-    const tx = db.transaction(STORE_NAME, 'readwrite');
-    await mergeSanFranciscoDefaultStops(tx, defaultStops);
-    await tx.done;
-}
-
-/**
- * If SF demo stops were dropped (e.g. older itinerary sync), restore them when the user’s city is San Francisco.
- * Does nothing when Kolkata or when demo stops already exist.
- */
-export async function ensureSanFranciscoDemoStopsPresent() {
-    const db = await initDB();
-    const probe = await db.get(STORE_NAME, 'sf_chinatown_dragons_gate');
-    if (probe) return;
-    const defaultStops = await loadSanFranciscoDefaultStops();
-    const tx = db.transaction(STORE_NAME, 'readwrite');
-    await mergeSanFranciscoDefaultStops(tx, defaultStops);
-    await tx.done;
-}
 
 export async function initDB() {
     const db = await openDB(DB_NAME, 1, {
@@ -87,9 +37,6 @@ export async function fetchDynamicNodes(city, dates, days, budget, llmTier = 'la
             Array.isArray(dynamicPayload.itinerary) &&
             dynamicPayload.itinerary.length > 0
         ) {
-            const defaultStops = city === 'San Francisco'
-                ? await loadSanFranciscoDefaultStops()
-                : [];
             const tx = db.transaction(STORE_NAME, 'readwrite');
             
             // Clear existing nodes before overwriting to prevent ID conflicts from changing cities
@@ -112,10 +59,6 @@ export async function fetchDynamicNodes(city, dates, days, budget, llmTier = 'la
                id: 'SYSTEM_ITINERARY_MAPPING',
                data: dynamicPayload.itinerary
             });
-
-            if (city === 'San Francisco') {
-                await mergeSanFranciscoDefaultStops(tx, defaultStops);
-            }
 
             await tx.done;
             return {

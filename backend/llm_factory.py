@@ -50,29 +50,17 @@ def get_chat_llm(tier: str):
 
     if tier == "large":
         primary = _openrouter_chat(config.LARGE_LLM_MODEL)
-        mid_fallback = _openrouter_chat(config.LARGE_LLM_FALLBACK_MODEL)
         ollama_fallback = _ollama_chat(config.OLLAMA_LARGE_LLM_MODEL)
-        return primary.with_fallbacks([mid_fallback, ollama_fallback])
-    else:
-        primary = _openrouter_chat(config.SMALL_LLM_MODEL)
-        ollama_fallback = _ollama_chat(config.OLLAMA_SMALL_LLM_MODEL)
         return primary.with_fallbacks([ollama_fallback])
 
-
-def get_vision_llm():
-    """Multimodal model via OpenRouter-compatible Chat Completions, with Ollama fallback."""
-    if config.force_ollama_fallback():
-        return _ollama_chat(config.OLLAMA_VISION_LLM_MODEL, temperature=0)
-    primary = _openrouter_chat(config.VISION_LLM_MODEL, temperature=0)
-    ollama_fallback = _ollama_chat(config.OLLAMA_VISION_LLM_MODEL, temperature=0)
-    return primary.with_fallbacks([ollama_fallback])
+    primary_small = _openrouter_chat(config.SMALL_LLM_MODEL)
+    ollama_small_fallback = _ollama_chat(config.OLLAMA_SMALL_LLM_MODEL)
+    return primary_small.with_fallbacks([ollama_small_fallback])
 
 
 def get_embedding_model() -> OpenAIEmbeddings | OllamaEmbeddings:
     global _embeddings
     if _embeddings is None:
-        # Allow OpenRouter embeddings even when chat fallback is forced to Ollama.
-        # This keeps vector search current without changing chat/vision routing.
         if config.OPENROUTER_EMBEDDING_MODEL:
             _embeddings = OpenAIEmbeddings(
                 model=config.OPENROUTER_EMBEDDING_MODEL,
@@ -80,9 +68,13 @@ def get_embedding_model() -> OpenAIEmbeddings | OllamaEmbeddings:
                 base_url=_openrouter_base_url(),
                 default_headers=_openrouter_headers(),
             )
-        else:
+        elif config.force_ollama_fallback():
             _embeddings = OllamaEmbeddings(
                 model=config.EMBEDDING_MODEL,
                 base_url=config.ollama_base_url(),
+            )
+        else:
+            raise RuntimeError(
+                "Set OPENROUTER_EMBEDDING_MODEL in backend/.env for OpenRouter-only mode."
             )
     return _embeddings

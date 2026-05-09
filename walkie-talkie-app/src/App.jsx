@@ -18,7 +18,7 @@ Your capabilities:
 
 When a user uploads an image, analyze it deeply:
 - If it's a building/landmark/mural: explain its local significance TODAY.
-- Keep responses conversational, vivid, entertaining, and under 300 words.
+- Keep responses conversational, vivid, entertaining, and concise.
 Always end responses with one "Local Secret" tip — something only regulars would know.`;
 
 const VISION_SYSTEM_PROMPT = `You are WalkieTalkie, an intelligent local travel Virtual Assistant analyzing images for student travelers.
@@ -26,14 +26,31 @@ Your sole purpose right now is to look at the uploaded image and describe it in 
 
 If it's a structural building, mural, menu, or landmark, explain its cultural and local significance, history, and what it means to locals today. 
 DO NOT plan an itinerary unless explicitly asked. Focus entirely on describing what is in the picture and giving it vibrant context.
-End your response with a "Local Secret" tip related to the kind of place or object shown in the image. Keep responses conversational, vivid, and under 250 words.`;
+End your response with a "Local Secret" tip related to the kind of place or object shown in the image. Keep responses conversational, vivid, and concise.`;
+
+const PROMPT_STRATEGIES = {
+  regular: {
+    label: "Regular",
+    notes: "Baseline persona only (no advanced prompting pipeline)",
+  },
+  meta: {
+    label: "Meta Prompting",
+    notes: "Existing backend meta constraints + persona",
+  },
+  chaining: {
+    label: "Prompt Chaining",
+    notes: "Existing prefetch chain (profile DB -> local history vector DB)",
+  },
+  self_reflection: {
+    label: "Self-Reflection",
+    notes: "Existing second-pass critique and polish",
+  },
+};
 
 const suggestedPrompts = [
   { icon: "🚶", text: "I'm walking near my pinned GPS — what should I notice here, and what's one affordable next stop?" },
-  { icon: "🍜", text: "5 cheap lunch spots where locals eat in Chinatown (San Francisco)" },
-  { icon: "🎨", text: "Best neighborhoods for community street art in San Francisco" },
+  { icon: "🎨", text: "Best neighborhoods for community street art" },
   { icon: "📸", text: "One free, culturally significant photo spot that's not a tourist trap" },
-  { icon: "🧭", text: "Tell me a Kolkata story that isn't in standard tourist brochures" },
   { icon: "💰", text: "1-day plan under $30 with history, food, and a sunset (use my profile budget)" },
 ];
 
@@ -72,40 +89,26 @@ function formatTripDayHeading(isoDateStr, dayNum) {
 
 export default function WalkieTalkie() {
   const [showMap, setShowMap] = useState(false);
-  const [simulateWalk, setSimulateWalk] = useState(true);
   const [tripMode, setTripMode] = useState("planning");
   const [selectedCity, setSelectedCity] = useState("San Francisco");
   const [llmTier, setLlmTier] = useState("large");
+  const [promptStrategy, setPromptStrategy] = useState("self_reflection");
   const [travelDates, setTravelDates] = useState("");
   const [numDays, setNumDays] = useState(1);
+  const [numDaysInput, setNumDaysInput] = useState("1");
   const [budget, setBudget] = useState("Moderate");
   const [activeTab, setActiveTab] = useState("itinerary");
   const [itineraryMap, setItineraryMap] = useState(null);
   
-  // Dynamic GPS logic
+  // Live GPS from browser geolocation hook (no simulation mode).
   const { location } = useGeolocation();
-  const [mockGPS, setMockGPS] = useState({ lat: 37.7955, lng: -122.3937 });
-  
-  useEffect(() => {
-    if (!simulateWalk) return undefined;
-    const demoSpots = [
-      { lat: 37.7907, lng: -122.4058 }, // Dragon's Gate
-      { lat: 37.7937, lng: -122.4048 }, // Portsmouth Square
-      { lat: 37.7940, lng: -122.4056 }, // Golden Gate Fortune Cookie
-    ];
-    let idx = 0;
-    const interval = setInterval(() => {
-      idx = (idx + 1) % demoSpots.length;
-      setMockGPS(demoSpots[idx]);
-    }, 20 * 1000); // quick walk simulation for testing
-    return () => clearInterval(interval);
-  }, [simulateWalk]);
-  const currentGPS = simulateWalk ? mockGPS : (location || mockGPS);
+  const currentGPS = location || null;
 
   const [chatByCity, setChatByCity] = useState({});
   const [sessionToken, setSessionToken] = useState(null);
   const [sessionUserId, setSessionUserId] = useState("");
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [hasPromptedGuestSignIn, setHasPromptedGuestSignIn] = useState(false);
   const [authUserId, setAuthUserId] = useState("");
   const [userBudget, setUserBudget] = useState("");
   const [input, setInput] = useState("");
@@ -122,6 +125,7 @@ export default function WalkieTalkie() {
   const chatStorageKey = `walkie_talkie_chat_by_city_v1_${sessionUserId || "guest"}`;
 
   const messages = chatByCity[selectedCity] || [];
+  const selectedStrategy = PROMPT_STRATEGIES[promptStrategy] || PROMPT_STRATEGIES.regular;
 
   const updateCurrentCityMessages = (updater) => {
     setChatByCity((prev) => {
@@ -225,8 +229,8 @@ export default function WalkieTalkie() {
   };
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, loading]);
+    bottomRef.current?.scrollIntoView({ behavior: "auto" });
+  }, [messages.length, loading]);
 
   /** Neighborhood line for Start Walk — from day 1 of the generated plan, else falls back to city in SpatialTrigger. */
   const walkAreaLabel =
@@ -237,22 +241,14 @@ export default function WalkieTalkie() {
   useEffect(() => {
     let cancelled = false;
     import("./db/db.js").then((m) => {
-      const chain = m.ensureDefaultWalkNodesForCity(selectedCity).then(() => {
-        if (selectedCity === "San Francisco") {
-          return m.ensureSanFranciscoDemoStopsPresent();
-        }
-      });
-      return chain.then(() => {
-        if (cancelled) return;
-        return Promise.all([
-          m.getUnvisitedNodes().then((nodes) => {
-            if (!cancelled) setActionPlan(nodes);
-          }),
-          m.getSystemMapping().then((map) => {
-            if (!cancelled) setItineraryMap(map);
-          }),
-        ]);
-      });
+      return Promise.all([
+        m.getUnvisitedNodes().then((nodes) => {
+          if (!cancelled) setActionPlan(nodes);
+        }),
+        m.getSystemMapping().then((map) => {
+          if (!cancelled) setItineraryMap(map);
+        }),
+      ]);
     });
     return () => {
       cancelled = true;
@@ -283,10 +279,7 @@ export default function WalkieTalkie() {
               role: "assistant",
               content:
                 `I've generated a ${numDays}-day itinerary for ${selectedCity}. ` +
-                `Switch to Holiday Mode → Day-to-Day to see each day.\n` +
-                `Debug: tier=${result?.debug?.tier || llmTier}, mode=${result?.debug?.provider_mode || "unknown"}, ` +
-                `candidates=${(result?.debug?.model_candidates || []).join(", ") || "n/a"}, ` +
-                `places=${result?.counts?.places ?? "?"}, days=${result?.counts?.itineraryDays ?? "?"}`,
+                `Switch to Holiday Mode -> Day-to-Day to see each day.`,
             },
           ]);
         } else {
@@ -294,13 +287,7 @@ export default function WalkieTalkie() {
             ...prev,
             {
               role: "assistant",
-              content:
-                `Itinerary generation failed.\n` +
-                `Model/backend response: ${result?.error || "No details returned."}\n` +
-                `Debug: tier=${result?.debug?.tier || llmTier}, mode=${result?.debug?.provider_mode || "unknown"}, ` +
-                `candidates=${(result?.debug?.model_candidates || []).join(", ") || "n/a"}, ` +
-                `places=${result?.counts?.places ?? "?"}, days=${result?.counts?.itineraryDays ?? "?"}\n` +
-                `${result?.raw ? `Raw payload: ${result.raw}` : ""}`,
+              content: `I couldn't generate the itinerary right now. Please try again in a bit.`,
             },
           ]);
         }
@@ -389,12 +376,13 @@ export default function WalkieTalkie() {
   };
 
   const sendMessage = async (text, isHidden = false) => {
-    if (!sessionToken) {
+    if (!sessionToken && !hasPromptedGuestSignIn) {
       updateCurrentCityMessages((prev) => [
         ...prev,
         { role: "assistant", content: "Please sign in to keep your conversation history, visited places, and budget preferences synced." },
       ]);
       setIsAuthModalOpen(true);
+      setHasPromptedGuestSignIn(true);
       // Continue as guest so first-time users still get a model response.
     }
     const userText = (typeof text === 'string' ? text : null) || input.trim();
@@ -466,6 +454,8 @@ export default function WalkieTalkie() {
 
     try {
       const hasImage = apiMessages.some(m => m.images);
+      const lat = currentGPS?.lat ?? null;
+      const lng = currentGPS?.lng ?? null;
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -477,10 +467,11 @@ export default function WalkieTalkie() {
             ...apiMessages
           ],
           stream: true,
-          latitude: currentGPS.lat,
-          longitude: currentGPS.lng,
+          latitude: lat,
+          longitude: lng,
           city: selectedCity,
           session_token: sessionToken,
+          prompting_mode: promptStrategy,
         }),
       });
 
@@ -717,6 +708,7 @@ export default function WalkieTalkie() {
           padding: 16px; border-top: 1px solid #2a2820;
           background: #0f0e0b;
           position: sticky; bottom: 0;
+          z-index: 5;
         }
         .input-wrap { max-width: 780px; margin: 0 auto; display: flex; gap: 8px; align-items: flex-end; }
         .img-attach-preview { position: relative; margin-bottom: 8px; }
@@ -774,7 +766,6 @@ export default function WalkieTalkie() {
           <SpatialTrigger
             city={selectedCity}
             areaLabel={walkAreaLabel}
-            mockLocation={simulateWalk ? currentGPS : null}
             llmTier={llmTier}
             onClose={() => setShowMap(false)}
           />
@@ -842,16 +833,36 @@ export default function WalkieTalkie() {
               <option value="large">Large (nvidia/nemotron-3-nano-30b-a3b:free)</option>
               <option value="small">Small (nvidia/nemotron-nano-9b-v2:free)</option>
            </select>
+
+           <span style={{ fontSize: "12px", color: "#8a7d66", textTransform: "uppercase", letterSpacing: "1px", fontWeight: "bold", marginLeft: "8px" }}>Prompt strategy:</span>
+           <select
+              value={promptStrategy}
+              onChange={(e) => setPromptStrategy(e.target.value)}
+              title="Switch prompting method to compare response quality"
+              style={{ background: "#2a2820", color: "#f0ead6", border: "1px solid #c8a96e44", padding: "6px 12px", borderRadius: "8px", outline: "none", fontSize: "14px", fontFamily: "inherit", cursor: "pointer", minWidth: "190px" }}
+           >
+              {Object.entries(PROMPT_STRATEGIES).map(([value, cfg]) => (
+                <option key={value} value={value}>
+                  {cfg.label}
+                </option>
+              ))}
+           </select>
            
            <span style={{ fontSize: "12px", color: "#8a7d66", textTransform: "uppercase", letterSpacing: "1px", fontWeight: "bold", marginLeft: "8px" }}>Days:</span>
            <input
-              type="number"
-              min={1}
-              max={14}
-              value={numDays}
+              type="text"
+              inputMode="numeric"
+              pattern="[0-9]*"
+              value={numDaysInput}
               onChange={(e) => {
-                const n = parseInt(e.target.value, 10);
-                if (Number.isFinite(n)) setNumDays(Math.min(14, Math.max(1, n)));
+                const v = e.target.value.replace(/[^\d]/g, "");
+                if (v.length <= 2) setNumDaysInput(v);
+              }}
+              onBlur={() => {
+                const n = parseInt(numDaysInput, 10);
+                const safe = Number.isFinite(n) ? Math.min(14, Math.max(1, n)) : 1;
+                setNumDays(safe);
+                setNumDaysInput(String(safe));
               }}
               title="Number of days for this trip (used when you generate the itinerary)"
               style={{ width: "56px", background: "#2a2820", color: "#f0ead6", border: "1px solid #c8a96e44", padding: "6px 8px", borderRadius: "8px", outline: "none", fontSize: "14px", fontFamily: "inherit" }}
@@ -881,20 +892,6 @@ export default function WalkieTalkie() {
               disabled={loading}
               style={{ background: '#8b6914', color: '#0f0e0b', border: 'none', padding: '6px 14px', borderRadius: '16px', fontSize: '13px', fontWeight: 'bold', cursor: 'pointer', opacity: loading ? 0.5 : 1 }}>
               Generate itinerary
-           </button>
-           <button
-              onClick={() => setSimulateWalk((v) => !v)}
-              style={{
-                background: simulateWalk ? '#c8a96e' : '#2a2820',
-                color: simulateWalk ? '#0f0e0b' : '#f0ead6',
-                border: '1px solid #c8a96e44',
-                padding: '6px 14px',
-                borderRadius: '16px',
-                fontSize: '13px',
-                fontWeight: 'bold',
-                cursor: 'pointer'
-              }}>
-              {simulateWalk ? 'Walk sim: ON' : 'Walk sim: OFF'}
            </button>
         </div>
         )}
@@ -1088,7 +1085,9 @@ export default function WalkieTalkie() {
               ↑
             </button>
           </div>
-          <div className="hint">Upload photos of menus, murals, or buildings for instant local insight</div>
+          <div className="hint">
+            Prompt strategy: {selectedStrategy.label} · Upload photos of menus, murals, or buildings for instant local insight
+          </div>
         </div>
         )}
         </div>

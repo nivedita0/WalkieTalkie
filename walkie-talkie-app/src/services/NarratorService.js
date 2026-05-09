@@ -24,15 +24,21 @@ class NarratorService {
         const voices = this.synth.getVoices() || [];
         if (!voices.length) return null;
 
+        const englishVoices = voices.filter(v => {
+            const lang = (v.lang || '').toLowerCase();
+            return lang.startsWith('en-us') || lang.startsWith('en-');
+        });
+        const candidateVoices = englishVoices.length ? englishVoices : voices;
+
         let selected = null;
         for (const pref of this.voicePreferences) {
-            selected = voices.find(v => (v.name || '').includes(pref));
+            selected = candidateVoices.find(v => (v.name || '').includes(pref));
             if (selected) return selected;
         }
-        selected = voices.find(v => (v.lang || '').toLowerCase().startsWith('en-us'));
+        selected = candidateVoices.find(v => (v.lang || '').toLowerCase().startsWith('en-us'));
         if (selected) return selected;
-        selected = voices.find(v => (v.lang || '').toLowerCase().startsWith('en-'));
-        return selected || voices[0];
+        selected = candidateVoices.find(v => (v.lang || '').toLowerCase().startsWith('en-'));
+        return selected || candidateVoices[0];
     }
 
     // A web-audio synthesized "Walkie Talkie" ping/squelch sound
@@ -73,6 +79,7 @@ class NarratorService {
         await this.playPing();
 
         this.activeUtterance = new SpeechSynthesisUtterance(text);
+        this.activeUtterance.lang = 'en-US';
         // Less robotic defaults: near-natural speaking cadence.
         this.activeUtterance.rate = 0.96;
         this.activeUtterance.pitch = 1.02;

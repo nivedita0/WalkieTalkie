@@ -10,3 +10,5 @@ chromadb
 requests
 beautifulsoup4
 pyyaml
+ddgs
+pillow
