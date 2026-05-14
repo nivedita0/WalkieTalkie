@@ -1,0 +1,58 @@
+meta:
+  user_id: student_1
+  default_city: San Francisco
+queries:
+- id: san01
+  text: What are 5 cheap lunch spots near a historic district where locals eat?
+  city: San Francisco
+- id: san02
+  text: "I\u2019m in this city and have $25 for the day\u2014suggest 3 activities\
+    \ and 2 meals."
+  city: San Francisco
+- id: san06
+  text: Tell me about a cultural intersection in this city where two different communities
+    met.
+  city: San Francisco
+- id: san07
+  text: Plan a walking route from Point A to Point B with 2 stops that explain city
+    history.
+  city: San Francisco
+- id: san11
+  text: "I land at the airport and need to get to city center\u2014what\u2019s the\
+    \ cheapest public transit vs rideshare cost?"
+  city: San Francisco
+- id: san16
+  text: 'Image upload: What is this building/statue and what is the story behind it,
+    if any?'
+  city: San Francisco
+- id: san18
+  text: "What\u2019s the weather tomorrow\u2014should I plan indoor museums or outdoor\
+    \ walking?"
+  city: San Francisco
+- id: kol01
+  text: What are 5 cheap lunch spots near a historic district where locals actually
+    eat?
+  city: Kolkata
+- id: kol02
+  text: "I\u2019m in this city and have $25 for the day\u2014suggest 3 activities\
+    \ and 2 meals."
+  city: Kolkata
+- id: kol06
+  text: Tell me about a cultural intersection in this city where two different communities
+    met.
+  city: Kolkata
+- id: kol07
+  text: Plan a walking route from Point A to Point B with 2 stops that explain city
+    history.
+  city: Kolkata
+- id: kol11
+  text: "I land at the airport and need to get to city center\u2014what\u2019s the\
+    \ cheapest public transit vs rideshare cost?"
+  city: Kolkata
+- id: kol16
+  text: 'Image upload: What is this building/statue and why is it there?'
+  city: Kolkata
+- id: kol18
+  text: "What\u2019s the weather tomorrow\u2014should I plan indoor museums or outdoor\
+    \ walking?"
+  city: Kolkata

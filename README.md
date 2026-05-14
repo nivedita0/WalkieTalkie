@@ -158,12 +158,48 @@ npm run dev
 
 Visit `http://localhost:5173` in your browser.
 
-### Testing
+### Testing & Evaluation
 
-#### Backend QA (multi-user auth/session isolation):
+#### Model Evaluation (40 queries, 2 tiers)
+```bash
+cd backend && source venv/bin/activate
+python ../evaluation/run_eval.py --tier both
+```
+Results saved to `evaluation/results/eval_TIMESTAMP.jsonl`
+
+For detailed instructions, see [evaluation/README_SCRIPTS.md](evaluation/README_SCRIPTS.md)
+
+#### Backend QA Scripts
+
+**Multi-user auth/session isolation testing**:
 ```bash
 cd backend
 python auth_isolation_qa.py
+```
+
+**Interactive query testing (manual verification)**:
+```bash
+cd backend
+python comprehensive_qa.py
+```
+
+#### Smoke Testing (Quick Validation)
+```bash
+cd evaluation
+python slice_queries.py --input queries.yaml \
+  --out-smoke queries_smoke.yaml \
+  --out-rest queries_rest.yaml
+
+cd ../backend && source venv/bin/activate
+python ../evaluation/run_eval.py --tier small \
+  --queries ../evaluation/queries_smoke.yaml
+```
+
+#### Result Analysis
+```bash
+cd evaluation
+python analyze_results.py     # Print summary
+python summarize_eval.py --input results/eval_*.jsonl --out results/summary.json
 ```
 
 #### Frontend Build Verification:

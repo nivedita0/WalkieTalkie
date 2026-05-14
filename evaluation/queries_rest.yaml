@@ -1,0 +1,98 @@
+meta:
+  user_id: student_1
+  default_city: San Francisco
+queries:
+- id: san03
+  text: Which neighborhoods are best for seeing community-driven street art?
+  city: San Francisco
+- id: san04
+  text: I want a free Instagram spot that is culturally significant but not a tourist
+    trap.
+  city: San Francisco
+- id: san05
+  text: What is a snack from a local eatery in a cultural neighborhood that has been
+    there for over 20 years?
+  city: San Francisco
+- id: san08
+  text: "I'm standing in front of a landmark/mural\u2014what is its significance to\
+    \ local people living here today?"
+  city: San Francisco
+- id: san09
+  text: How has one old neighborhood changed in the last 50 years, and where can I
+    still see the old version?
+  city: San Francisco
+- id: san10
+  text: Give me a 1-day plan under $30 that includes history, local food, and a sunset.
+  city: San Francisco
+- id: san12
+  text: "I have $90 for 3 days including stay\u2014break down a feasible plan."
+  city: San Francisco
+- id: san13
+  text: Compare staying in a hostel vs an Airbnb in a central neighborhood for a student
+    traveler.
+  city: San Francisco
+- id: san14
+  text: Is a major attraction sold out this weekend, or is there a local alternative
+    nearby?
+  city: San Francisco
+- id: san15
+  text: "I\u2019m vegan and want food under $12 near city center."
+  city: San Francisco
+- id: san17
+  text: "Image upload: I\u2019m looking at this menu\u2014which item is the most authentic\
+    \ local specialty?"
+  city: San Francisco
+- id: san19
+  text: Is a major park/monument open today and is there any pay-what-you-wish day?
+  city: San Francisco
+- id: san20
+  text: Find me the fastest transit route from my current location to a destination
+    using only local buses/trains.
+  city: San Francisco
+- id: kol03
+  text: Which neighborhoods are best for seeing community-driven street art?
+  city: Kolkata
+- id: kol04
+  text: I want a free Instagram spot that is culturally significant but not a tourist
+    trap.
+  city: Kolkata
+- id: kol05
+  text: What is a snack from a local eatery in a cultural neighborhood that has been
+    there for over 20 years?
+  city: Kolkata
+- id: kol08
+  text: "I'm standing in front of a landmark/mural\u2014what is its significance to\
+    \ local people living here today?"
+  city: Kolkata
+- id: kol09
+  text: How has one old neighborhood changed in the last 50 years, and where can I
+    still see the old version?
+  city: Kolkata
+- id: kol10
+  text: Give me a 1-day plan under $30 that includes history, local food, and a sunset.
+  city: Kolkata
+- id: kol12
+  text: "I have $90 for 3 days including stay\u2014break down a feasible plan."
+  city: Kolkata
+- id: kol13
+  text: Compare staying in a hostel vs an Airbnb in a central neighborhood for a student
+    traveler.
+  city: Kolkata
+- id: kol14
+  text: Is a major attraction sold out this weekend, or is there a local alternative
+    nearby?
+  city: Kolkata
+- id: kol15
+  text: "I\u2019m vegan and want food under $12 near city center."
+  city: Kolkata
+- id: kol17
+  text: "Image upload: I\u2019m looking at this menu\u2014which item is the most authentic\
+    \ local specialty?"
+  city: Kolkata
+- id: kol19
+  text: Is a major park/monument open today and is there any pay-what-you-wish day?
+  city: Kolkata
+- id: kol20
+  text: Find me the fastest transit route from my current location to a destination
+    using only local buses/trains.
+  city: Kolkata
